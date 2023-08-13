@@ -1,0 +1,215 @@
+import pyodbc
+conn = pyodbc.connect("Driver=SQL Server;Server=MBK;Database=DoubleStarsDB;Trusted_Connection=yes")
+import math
+from math import sin, cos, tan, atan, sqrt, radians, pi
+global no_of_with_orbits, max_loops
+
+class Orbit:
+
+    def __init__(self, obs, wds, disc, mag1, mag2, peri, peri_unit, peri_error, alfa, alfa_error, alfa_unit, incl, incl_error, node,
+                 node_error, time_peri, time_unit, time_error, ecc, ecc_error, long, long_error, grade):
+
+        self.obs = obs
+        self.wds = wds
+        self.disc = disc
+        self.mag1 = mag1
+        self.mag2 = mag2
+        self.per_u = peri_unit
+        self.per = float(peri)
+        self.per_e = float(peri_error)
+        self.alfa_u = alfa_unit
+        self.alfa = float(alfa)
+        self.alfa_e = float(alfa_error)
+        self.incl = float(incl)
+        self.incl_e = float(incl_error)
+        self.node = float(node)
+        self.node_e = float(node_error)
+        self.time = float(time_peri)
+        self.time_u = time_unit
+        self.time_e = float(time_error)
+        self.ecc = float(ecc)
+        self.ecc_e = float(ecc_error)
+        self.long = float(long)
+        self.long_e = float(long_error)
+        self.grade = int(grade)
+        self.calc = True
+
+    @classmethod
+    def get(cls, text_str):
+
+        ra, dec, wds, disc, ads, hd, hip, mag1, mag_flag1, mag2, mag_flag2, peri, peri_unit, peri_error, alfa, \
+            alfa_unit, alfa_error, incl, incl_error, node, node_asc, node_error, time_peri, time_unit, \
+            time_error, ecc, ecc_error, long, long_error, eqnx, last_obs, grade, notes, ref, name \
+            = text_str.split('|')
+
+        def c0(c):
+            if c == '' or c == '--.':
+                return '0'
+            else:
+                return c
+
+        def obs(dec):
+            if float(dec) / 10000 > -20: # dec needs to be above -20 degrees
+                return 'Y'
+            else:
+                return 'N'
+
+        return cls(obs(dec), wds, disc, c0(mag1), c0(mag2), c0(peri), peri_unit, c0(peri_error), c0(alfa), c0(alfa_error), alfa_unit, c0(incl),
+                   c0(incl_error),c0(node), c0(node_error), c0(time_peri), time_unit, c0(time_error), c0(ecc),
+                   c0(ecc_error), c0(long), c0(long_error), c0(grade))
+
+    def is_calcuable(self):
+
+        if self.obs == 'Y' and self.time_u == 'y' and self.per_u == 'y' and self.alfa_u == 'a':
+            return True
+        else:
+            self.calc = False       # overwrite to skip
+            return False
+
+    @staticmethod
+    def calc_dist_arcsec(pa1, sep1, pa2, sep2):
+
+        def x(pa, sep):
+            return round(sep * sin(radians(pa)), 5)
+
+        def y(pa, sep):
+            return round(sep * -1 * cos(radians(pa)), 5)
+
+        x1 = x(pa1, sep1)
+        y1 = y(pa1, sep1)
+        x2 = x(pa2, sep2)
+        y2 = y(pa2, sep2)
+
+        dist_arcsec = sqrt(((x2 - x1) ** 2) + ((y2 - y1) ** 2))
+
+        return dist_arcsec
+
+    @staticmethod
+    def calc(per, alfa, incl, long, time, ecc, node, epoch, max_loops):
+
+        pa = 0
+        sep = 0
+
+        if per <= 0:
+            print('! Period <= ZERO  -  Position cannot be calculated')
+        else:
+            c = pi * 2
+            incl_rad = radians(incl)
+            node_rad = radians(node)
+            long_rad = radians(long)
+            n = c / per
+            ma = n * (epoch - time)
+            m = ma - c * int(ma / c)
+            ea = m
+            a = ea - (ecc * sin(ea)) - m
+            loops = 0
+            while (abs(a) >= 1E-15) and (loops < max_loops):
+                loops += 1
+                a = a / (1 - (ecc * cos(ea)))
+                ea = ea - a
+                a = ea - (ecc * sin(ea)) - m
+            if loops == max_loops:
+                print('! Calculation of anomaly requires > max_loops  -  stopped - cannot calculate')
+            else:
+                tu = sqrt((1 + ecc) / (1 - ecc)) * tan(ea / 2)
+                nu = 2 * atan(tu)
+                r = alfa - alfa * ecc * cos(ea)
+                y = sin(nu + long_rad) * cos(incl_rad)
+                x = cos(nu + long_rad)
+                q = atan(y / x)
+                if x < 0:
+                    q = q + pi
+                else:
+                    if q < 0:
+                        q = q + c
+                th = q + node_rad
+                if th > c:
+                    th = th - c
+                rh = r * x / cos(q)
+                pa = int(th / radians(1) * 10 + 0.5) / 10
+                sep = int(rh * 100 + 0.5) / 100
+
+        return pa, sep
+# ----------------------------- drop Table --------------------------------
+def drop_DIST_table(conn):
+
+    cursor = conn.cursor()
+    t = "DROP TABLE IF EXISTS dbo.DIST;"
+    cursor.execute(t)
+    conn.commit()
+
+# ----------------------------- create Table --------------------------------
+def create_DIST_table(conn):
+
+    cursor = conn.cursor()
+    t = "CREATE TABLE dbo.DIST"
+    t += "(NO INTEGER PRIMARY KEY NOT NULL IDENTITY, WDS CHAR(10), DISC CHAR(14),"
+    t += "MAG1 NUMERIC(4,2), MAG2 NUMERIC(4,2), PA_DEG_FIRST NUMERIC(5,2), SEP_SEC_FIRST NUMERIC(6,3), "
+    t += "PA_DEG_LAST NUMERIC(5,2), SEP_SEC_LAST NUMERIC(6,3), ANG_DIST NUMERIC(6,3));"
+
+    cursor.execute(t)
+    conn.commit()
+
+def get_orbits(epoch_start, increment, max_loops):
+
+    cursor = conn.cursor()
+    f = open('Input_Files/orb6orbits with pipe.txt', 'r')    # all orbits in 6th cat.
+    p = open('Output_Files/wds_positions_dist.txt', 'w')     # calculcated angular distance
+    s = open('Output_Files/skipped orbits.txt', 'w')         # orbits rejected
+
+    no_of_calcuable = 0
+    no_of_rejected = 0
+    no_of_orbits = 0
+
+    f.readline()  # read header 1
+    f.readline()  # read header 2
+
+    p.write('epoch ' + str(epoch_start) + '-' + str(epoch_start+increment))
+    p.write('\n')
+    p.write('wds|disc|mag1|mag2|pa_first|sep_first|pa_last|sep_last|ang_dist|')
+    p.write('\n')
+
+    for orbit in f:  # read orbital data
+        no_of_orbits += 1
+        o = Orbit.get(orbit)
+        if Orbit.is_calcuable(o):    # may skip
+            no_of_calcuable += 1
+
+            calc_pa_first, calc_sep_first = Orbit.calc(o.per, o.alfa, o.incl, o.long, o.time, o.ecc,o.node, epoch_start, max_loops)
+            calc_pa_last, calc_sep_last = Orbit.calc(o.per, o.alfa,o.incl, o.long, o.time, o.ecc,o.node, epoch_start + increment, max_loops)
+            calc_ang_dist = Orbit.calc_dist_arcsec(calc_pa_first, calc_sep_first, calc_pa_last, calc_sep_last)
+
+            print(o.wds, calc_pa_first, calc_sep_first, calc_pa_last, calc_sep_last, calc_ang_dist)
+
+            p.write(o.wds + '|' + o.disc + '|' + str(o.mag1) + '|' + str(o.mag2) + '|' + str(calc_pa_first) + '|' + str(calc_sep_first) + '|' +
+                    str(calc_pa_last) + '|' + str(calc_sep_last) + '|' + str(calc_ang_dist) + '|')
+
+            p.write('\n')
+            val = (o.wds, o.disc, o.mag1, o.mag2, calc_pa_first, calc_sep_first, calc_pa_last, calc_sep_last, calc_ang_dist)
+            sql = "INSERT INTO DIST (WDS, DISC, MAG1, MAG2, PA_DEG_FIRST, SEP_SEC_FIRST, PA_DEG_LAST, SEP_SEC_LAST, ANG_DIST)"
+            sql += "VALUES (?,?,?,?,?,?,?,?,?)"
+            cursor.execute(sql, val)
+            conn.commit()
+        else:
+            no_of_rejected += 1
+            s.write(f'{o.wds} skipped ...')
+            s.write('\n')
+
+        del o                  # delete instance from memory
+
+    f.close()
+    p.close()
+    s.close()
+
+    print('No of read 6th cat. orbits :', no_of_orbits)
+    print(' rejected                  :', no_of_rejected)
+    print(' calcuable                 :', no_of_calcuable)
+
+    return
+
+
+# --------------- "Mission Control" --------------
+drop_DIST_table(conn)
+create_DIST_table(conn)
+get_orbits(2023,8,25000)
+# ------------------------------------------------
